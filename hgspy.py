@@ -8,16 +8,25 @@ Created on Wed Dec 20 15:42:40 2017
 import flopy
 import numpy as np
 from scipy.interpolate import griddata
-from scipy.ndimage import label
 import os
-import pandas as pd
 import matplotlib
-from numpy import ma
-from matplotlib import colors, ticker, cm
 
-def load_modflowmodel(modelprefix):
+
+def load_modflow_packages(modelprefix):
     '''
     Loads all modflow files via flopy
+    
+    Input:
+        - modelprefix: Prefix of the Model files (*.nam, *.in, *.dis, etc.)
+        
+    Output:
+        - ml: General Modelvariable
+        - dis: Discretization Package
+        - bas: Basic Package
+        - lpf: Layer-Property Flow Package
+        - rch: Recharge Package
+        - wel: Well Package
+        - drn: Drain Package
     '''
     
     # Assign all Modflow packages to variables
@@ -34,274 +43,155 @@ def load_modflowmodel(modelprefix):
 def model_dimensions(dis):
     '''
     Get the model dimensions from the dis package
-    '''
     
+    Input:
+        - dis: Discretization Package
+        
+    Output:
+        - nrow: Number of rows (block-centered)
+        - ncol: Number of columns (block-centered)
+        - nrowc: Number of rows (node-centered)
+        - ncolc: Number of columns (node-centered)
+        - nlay: Number of layer
+    '''
     nrow=dis.nrow #number of rows (block centered)
     ncol=dis.ncol #number of columns
     ncolc=ncol+1 #number of columns (node centered)
     nrowc=nrow+1 #number of rows
     nlay=dis.nlay
-         
-    return nrow, ncol, nrowc, ncolc, nlay
+    
+    #xy-coordinates (block-centered)
+    y=np.sort(np.array(dis.get_node_coordinates()[0])) 
+    x=np.array(dis.get_node_coordinates()[1])
+    XYgrid=np.array([np.meshgrid(x,y)[0].ravel(), np.meshgrid(x,y)[1].ravel()]).T # meshgrid creates the coordinates of all existing nodes
+    
+    #xy-coordinates (node centered)
+    xc=flopy.utils.reference.SpatialReference.get_xedge_array(dis)
+    yc=np.sort(flopy.utils.reference.SpatialReference.get_yedge_array(dis))
+    XYCgrid=np.array([np.meshgrid(xc,yc)[0].ravel(), np.meshgrid(xc,yc)[1].ravel()]).T 
+      
+    return nrow, ncol, nrowc, ncolc, nlay, x, y, XYgrid, xc, yc, XYCgrid
 
 def units(ml, dis):
     '''
     Get the model units used in Modflow
+    
+        Input:
+        - ml: General Modelvariable
+        - dis: Discretization Package
+        
+    Output:
+        - weight: Weight unit
+        - length: Lenght unit
+        - time: Time unit
     '''
     
     time=dis.itmuni_dict[dis.itmuni][0:-1]
-    weight='kilogram'
+    weight='kilogram' #not yet implemented
     length_dict={0 : 'undefined', 1 : 'feet', 2 : 'metre', 3 : 'centimetre'}
     length=length_dict[dis.lenuni]
     
     return weight, length, time
-    
-def _dir_check(): 
-    '''
-    Check for export folder "hgs_files"
-    '''
-
-    if os.path.isdir('./hgs_files')==1:
-        pass
-    elif os.path.isdir('./hgs_files')==0:
-        os.mkdir('./hgs_files')
-    if os.path.isdir('./hgs_files/rch')==1:
-        pass
-    elif os.path.isdir('./hgs_files/rch')==0:
-        os.mkdir('./hgs_files/rch')
-        
-# exporting single packages - functions
-def export_grid(dis):
-    '''
-    This creates a file '2d_layer_grid.in' of the horizontal 2d grid-slice and a 'zX.in' file of each layer(incl. baselayer). The z-file consists of a list height values for each node
-
-    This file can be loaded in HGS via:
-        generate variable rectangles
-            include data/2d_layer_grid.in
-        
-        generate layers interactive
-            zone by layer
-
-            base elevation
-                elevation from gms file
-                    data/z1.in 
-            end ! base elevation
-
-         new layer
-            layer name
-                layer_1
-            minimum layer thickness
-                0.0 
-            elevation from gms file
-                data/z2.in
-        end ! new layer
-        end ! layers interactive
-        end ! grid generation
-    '''
-
-    #model geometry size
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
 
 
-    #xy-coordinates (block-centered)
-    y=np.array(dis.get_node_coordinates()[0]) 
-    x=np.array(dis.get_node_coordinates()[1])
-    XYgrid=np.array([np.meshgrid(x,y)[0].ravel(), np.meshgrid(x,y)[1].ravel()]).T # meshgrid creates the coordinates of all existing nodes
-    
 
-    #xy-coordinates (node centered)
-    xc=flopy.utils.reference.SpatialReference.get_xedge_array(dis)
-    yc=flopy.utils.reference.SpatialReference.get_yedge_array(dis)
-    XYCgrid=np.array([np.meshgrid(xc,yc)[0].ravel(), np.meshgrid(xc,yc)[1].ravel()]).T 
-    
-
-    #z-coordinates (block-centered)
-    z=[]
-    for i in reversed(range(0,nlay)):        #flip layer numbering 0(lowest) to n+1 (highest)
-        z.append(dis.getbotm()[i])           #z-value of layer bottom
-    z.append(dis.gettop())                #z-value of layer top
-    
-
-    # filter out unusual high or low botm layers
-    for i in range(0,len(z)-1):
-        z[i][np.where(z[i]>z[3])]=z[3][np.where(z[i]>z[3])]
-
-    
-    #z-coordninates (node-centered)
-    zc=[]
-    for i in range(0,nlay):
-        zc.append(griddata(XYgrid,z[i].ravel(),XYCgrid, method='cubic',fill_value=666).reshape(nrowc, ncolc)) # calculated via cubic interpolation
-    zc.append(griddata(XYgrid,z[-1].ravel(),XYCgrid, method='cubic',fill_value=666).reshape(nrowc, ncolc))
-
-  
-    #flip along x-axis and ravel
-    zcr=[] # ravel height
-    for i in range(0,nlay+1):
-        zc[i]=np.flipud(zc[i])
-        zcr.append(zc[i].ravel())
-    
-  
-    #sort yc xc ascending
-    xc=np.sort(xc)
-    yc=np.sort(yc)
-    
-    # round to 2 digits
-    xc=np.round(xc,0)
-    yc=np.round(yc,0)
-    for i in range(0,nlay+1):
-        zcr[i]=np.round(zcr[i],0)
-        
-    
-    #Write Model Information to files
-    _dir_check()
-    file=open('hgs_files/2d_layer_grid.in', 'w')
-    file.write('!xi coordinates \n')
-    file.write(str(ncolc)+'\n')
-    for i in range(1,len(xc)+1):
-        if i%8==0:
-            file.write('{0:.0f}'.format(xc[i-1])+'\n')
-        else:
-            file.write('{0:.0f}'.format(xc[i-1])+' ')
-    file.write('\n\n!yi coordinates \n')
-    file.write(str(nrowc)+'\n')
-    for i in range(1,len(yc)+1):
-        if i%8==0:
-            file.write('{0:.0f}'.format(yc[i-1])+'\n')
-        else:
-            file.write('{0:.0f}'.format(yc[i-1])+' ')
-    file.close
-    for i in range(0, len(zcr)):  #z-values(height)
-        file=open('hgs_files/z'+str(i+1)+'.in', 'w')
-        file.write('DATASET \n')
-        file.write('ND '+ str(nrowc*ncolc)+'\n')
-        file.write('TS 0.0 \n')
-        for q in range(0,ncolc*nrowc):
-            file.write('{0:.0f}'.format(zcr[i][q])+'\n')
-        file.close
-    
-   
-    # print result   
-    print('-----------------')
-    print('\nSucessfully exported Geometry Files!\n')
-    print('Total layers:'+str(nlay)+'\n')
-
-    return XYgrid,XYCgrid
-
-def export_new_gridsize(xll=0, yll=0):
-    return
-def export_ZoneRaster(lbl):
+# exporting single packages - functions  
+def export_grid(dis, bas,
+                raster_step=80, interpolation_method='nearest',
+                nodata_value=-99999,
+                nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0, 
+                x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):
     
     # Model geometry
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
-    if nsublayer==0:
-        nsublayer=np.ones([1,nlay])
-        
-    # xy-coordinates (block-centered)
-    y=np.array(dis.get_node_coordinates()[0]) 
-    x=np.array(dis.get_node_coordinates()[1])
-    XYgrid=np.array([np.meshgrid(x,y)[0].ravel(), np.meshgrid(x,y)[1].ravel()]).T # meshgrid creates the coordinates of all existing nodes
-    
-    # xy-coordinates (cell-centered)
-    yc=np.linspace(np.max(y),0,nrow*3)
-    xc=np.linspace(0,np.max(x),ncol*3)
-    XYCgrid=np.array([np.meshgrid(xc,yc)[0].ravel(), np.meshgrid(xc,yc)[1].ravel()]).T # meshgrid creates the coordinates of all existing nodes
-    
-    # flip lbl along y-achis 
-    lbl=lbl.reshape(nlay, nrow, ncol)
-    lblf=[]
-    for i in range(len(lbl)):
-        lblf.append(np.flipud(lbl[i]))
-    lblf
-    
-    # transform to fine mesh
-    label_fine=[]
-    for i in range(len(ibound)):
-        label_fine.append(griddata(XYgrid,lblf[i].ravel(),XYCgrid, method='nearest',fill_value=666).reshape(nrow*3, ncol*3)) # calculated via cubic interpolation
-    
-    # raster data
-    ncols=ncol*3
-    nrows=nrow*3
-    xllcorner=np.min(xc)
-    yllcorner=np.min(yc)
-    nodata_value=-9999
-    cellsize=(exit)*(abs(np.min(yc)-np.max(yc))/nrows)
-    
-def export_ibound(dis, bas, nsublayer=0):
-    '''
-    This creates a file 'ibound.in'. 
-    'nsublayer' contains the desired sublayers of each existing layer as an array (if none type 1; eg. [1 1 1] for a three layer system). 
-    The exported ibound file consists of a list of element numbers, one entry per line.:
-        N (number of inactive cell)
-        ..
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
 
-    This file can be loaded in HGS via:
-        Choose elements list
-            fname.in
-        make elements inactive
-    '''
-    
-    # Model geometry
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
-    if nsublayer==0:
-        nsublayer=np.ones([1,nlay])
-    
     # Get ibound array
-    ibound=bas.ibound.array 
-           
+    ibound=_get_ibound_array(dis,bas)   
+       
+    # get bottom array
+    btom=_change_order_to_hydrogeosphere(dis.botm.array)
     
-    # Flip layer numbering 
-    ibound=np.flipud(ibound)    # layer numbering 0(lowest) to n+1 (highest)
+    # get top array
+    top=_change_order_to_hydrogeosphere(dis.top.array)
     
+#    # reduce height when it exceds higher layer
+#    btom[-1][np.where(btom[-3]>top)]=top[np.where(btom[-3]>top)]
+#    for i in reversed(range(len(btom[0:-1]))):
+#        btom[i][np.where(btom[i]>btom[i+1])]=btom[i+1][np.where(btom[i]>btom[i+1])]
     
-    # Flip along y-axis
-    for i in range(0,len(ibound)):    
-        ibound[i]=np.flipud(ibound[i])
+    # Interpolate Arrays
+    [x_step, y_step, 
+     x_range, y_range, 
+    x_nsteps, y_nsteps, 
+    XLLCORNER, YLLCORNER, 
+    XYRgrid] = _calculate_raster_parameter(raster_step, xc, yc)
     
+    btom_interpolated=_interpolate(btom, XYgrid, XYRgrid, method=interpolation_method, nodata_value=nodata_value)
+    top_interpolated=_interpolate(top, XYgrid, XYRgrid, method=interpolation_method, nodata_value=nodata_value)
+    ibound_interpolated=_interpolate(ibound, XYgrid, XYRgrid, method=interpolation_method, nodata_value=nodata_value)
+    ibound_interpolated_joined=_create_ibound_joined(ibound_interpolated)
     
-    # Gather element number of inactive cell
-    iboundnel=[]  # ibound element number acc. to HGS
-    previous_elements=0     # total element number of the subjacent layers
-    for i in range(0,len(ibound)):
-        ibound_temp=np.where(ibound[i]==0) # m n number of matrix
-        for q in range(nsublayer[i]):
-            ibound_temp2=(ibound_temp[0]*ncol)+(ibound_temp[1]+1)+previous_elements
-            iboundnel.append(ibound_temp2)
-            previous_elements+=nrow*ncol
-    
-    
-    # total ibound cells
-    tot_ibound=0
-    for i in range(len(iboundnel)): 
-        tot_ibound+=np.shape(iboundnel[i])[0]
-    
-        
-    # Write Model Information to files
-    _dir_check()
-    
-    for i in range(nlay):
-        if i == 0:
-            start=0
-            stop=nsublayer[i]
-        else:
-            start+=nsublayer[i-1]
-            stop+=nsublayer[i]
-            
-        file=open('hgs_files/ibound'+str(i+1)+'.in', 'w')
-        for q in range(start,stop):  
-            for u in iboundnel[q]:
-                file.write(str(u)+'\n')
-        file.close
-         
-    
-    # Print out Information
-    print('-----------------')
-    print('Sucessfully exported Ibound File!\n')
-    print('Total layers:'+str(nlay)+'\n')
-    print('Total sublayers:'+str(np.sum(nsublayer))+'\n')
-    print('Total elements: '+str(tot_ibound)+'\n')
+    # reduce height when it exceds higher layer
+    for xi in range(np.shape(btom_interpolated)[2]):
+        for yi in range(np.shape(btom_interpolated)[1]):
+            if btom_interpolated[-1][yi,xi]>top_interpolated[0][yi,xi]:
+                btom_interpolated[-1][yi,xi]=top_interpolated[0][yi,xi]
+            else:
+               pass
+    for zi in reversed(range(np.shape(btom_interpolated)[0]-1)):
+        for xi in range(np.shape(btom_interpolated)[2]):
+            for yi in range(np.shape(btom_interpolated)[1]):
+                if btom_interpolated[zi][yi,xi]>btom_interpolated[zi+1][yi,xi]:
+                    btom_interpolated[zi][yi,xi]=btom_interpolated[zi+1][yi,xi]
+                else:
+                    pass
+                
+    # increase hight to above when ibound above is zero
+    for xi in range(np.shape(btom_interpolated)[2]):
+        for yi in range(np.shape(btom_interpolated)[1]):
+            if ((ibound_interpolated[-1][yi,xi]==0) &
+            (ibound_interpolated_joined[yi,xi]==1)):
+                btom_interpolated[-1][yi,xi]=top_interpolated[0][yi,xi]
+            else:
+               pass    
+    for zi in reversed(range(np.shape(btom_interpolated)[0]-1)):
+        for xi in range(np.shape(btom_interpolated)[2]):
+            for yi in range(np.shape(btom_interpolated)[1]):
+                if ((ibound_interpolated[zi][yi,xi]==0) &
+            (ibound_interpolated_joined[yi,xi]==1)):
+                    btom_interpolated[zi][yi,xi]=btom_interpolated[zi+1][yi,xi]
+                else:
+                    pass
+                
+    #increase height for very small cell volumes
+    for zi in reversed(range(np.shape(btom_interpolated)[0]-1)):
+        for xi in range(np.shape(btom_interpolated)[2]):
+            for yi in range(np.shape(btom_interpolated)[1]):
+                diff=abs(btom_interpolated[zi][yi,xi]-btom_interpolated[zi+1][yi,xi]) # heigt of the lowest layer
+                if ((diff<20)&(ibound_interpolated[zi][yi,xi]==1)):
+                    btom_interpolated[zi][yi,xi]=btom_interpolated[zi+1][yi,xi]-20
+                else:
+                    pass
+
+                
+    # merge top and btom
+    z_interpolated=btom_interpolated[:]
+    z_interpolated.append(top_interpolated[0][:])
+  
+    # create raster file
+    _write_raster('ibound', ibound_interpolated, x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, raster_step=raster_step, nodata_value=-99999, number_format='{0:.0f}')
+    _write_raster('z', z_interpolated, x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, raster_step=raster_step, nodata_value=-99999, number_format='{0:.0f}')
     return ibound
 
-def export_mprops(dis, lpf, ibound, nsublayer=0):
+def export_mprops(dis, lpf, bas,
+                  nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0, 
+                  x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):
     '''
     This creates a file for the (1) hydraulic conductivity, (2) specific storage and (3) specific yield of each layer. The file consists of a list of element numbers, one entry per line.:
         (1) hydraulic conductivity
@@ -327,55 +217,27 @@ def export_mprops(dis, lpf, ibound, nsublayer=0):
             data/specific_yield1.in
     '''
     
-    def labelPix(pix,n_val):
-        '''
-        Pix: Input Array of Mprops
-        n_val: Number of Mprops per cell
-        
-        Returns unique Zone numbers for cells of same material properties
-        '''
-        height, width, _ = pix.shape
-        pixRows = np.reshape(pix, (height * width, n_val))
-        unique, count = np.unique(pixRows, return_counts = True, axis = 0)
 
-        lbl = np.zeros((height, width), dtype = int)
-    
-        index=1
-        for zoneArray in unique:
-            pos=np.where((pix[:,:,0]==zoneArray[0])&(pix[:,:,1]==zoneArray[1])&(pix[:,:,2]==zoneArray[2]) & (pix[:,:,3]==zoneArray[3]))
-            lbl[pos]=index
-            index+=1
-    
-        lblmax=index-1
-    
-        return lbl,lblmax, unique
     
     #model geometry
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
-    if nsublayer==0:
-        nsublayer=np.ones([1,nlay])
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
+
     
     #model properties
-    hk=lpf.hk.array # horizontal hydraulic conductivity
-    vk=lpf.vka.array # vertical hydraulic conductivity
-    ss=lpf.ss.array # specific storage
-    sy=lpf.sy.array # specific yield
+    hk=_change_order_to_hydrogeosphere(lpf.hk.array) # horizontal hydraulic conductivity
+    vk=_change_order_to_hydrogeosphere(lpf.vka.array) # vertical hydraulic conductivity
+    ss=_change_order_to_hydrogeosphere(lpf.ss.array) # specific storage
+    sy=_change_order_to_hydrogeosphere(lpf.sy.array) # specific yield
+ 
+    # ibound - zero cell values
+    ibound=_get_ibound_array(dis, bas)
     
-
-    # flip layer numbering
-    hk=np.flipud(hk)
-    vk=np.flipud(vk)
-    ss=np.flipud(ss)
-    sy=np.flipud(sy)
-    
-    
-    # flip along x-axis
-    for i in range(0,len(hk)): #flip
-        hk[i]=np.flipud(hk[i])
-        vk[i]=np.flipud(vk[i])
-        ss[i]=np.flipud(ss[i])
-        sy[i]=np.flipud(sy[i])
-
     # delete unneccessary information via ibound
     for i in range(0,len(hk)):
         hk[i] = hk[i] * ibound[i]
@@ -402,32 +264,23 @@ def export_mprops(dis, lpf, ibound, nsublayer=0):
         mprops[i][:,1]=vkr[i]
         mprops[i][:,2]=ssr[i]
         mprops[i][:,3]=syr[i]
-    [lbl, lblmax, zone_mprops]=labelPix(mprops,4)
+    [lbl, lblmax, zone_mprops]=_labelPix(mprops,4)
 
-      
-    # Write Model Information to files
+     # Write Model Information to files
     _dir_check()
-    previous_elements=0     # total element number of the subjacent layers
-    file=open('hgs_files/zones.in', 'w')
-    for i in range(len(hkr)):
-         for u in range(nsublayer[i]):
-            for q in range(len(hkr[i])):
-                file.write(str((q+1)+previous_elements)+' '+str(lbl[i][q])+'\n')
-            previous_elements+=nrow*ncol
-    file.close  
     
     file=open('hgs_files/porous_media.mprops', 'w')
     for i in range(len(zone_mprops)):
         file.write('!------------------------------------------\n')
         file.write('material_zone_'+str(i+1))
         file.write('\n\nk anisotropic\n')
-        file.write('  '+'{0:.5e}'.format(zone_mprops[i,1]).replace('e','d')+'  '\
-                   +'{0:.5e}'.format(zone_mprops[i,1]).replace('e','d')+'  '\
-                   +'{0:.5e}'.format(zone_mprops[i,0]).replace('e','d')+'\n\n')
+        file.write('  '+'{0:.5e}'.format(zone_mprops[i,0]).replace('e','d')+'  '\
+                   +'{0:.5e}'.format(zone_mprops[i,0]).replace('e','d')+'  '\
+                   +'{0:.5e}'.format(zone_mprops[i,1]).replace('e','d')+'\n\n')
         file.write('Specific storage\n')
         file.write('  '+'{0:.5e}'.format(zone_mprops[i,2]).replace('e','d')+'\n\n')
-        file.write('Porosity\n')
-        file.write('  '+'{0:.5e}'.format(zone_mprops[i,3])+'\n\n')
+        #file.write('Porosity\n')
+        #file.write('  '+'{0:.5e}'.format(zone_mprops[i,3])+'\n\n')
         file.write('end material\n')
     file.close
 
@@ -441,6 +294,7 @@ def export_mprops(dis, lpf, ibound, nsublayer=0):
         file.write('material_zone_'+str(i+1)+'\n')
     file.close
     
+    return lbl.reshape([nlay,nrow,ncol]), lblmax, zone_mprops, hk, vk, ss, sy
     # print result   
     print('-----------------')
     print('Sucessfully exported mprops files!\n')
@@ -463,9 +317,30 @@ def export_mprops(dis, lpf, ibound, nsublayer=0):
         cbar = fig.colorbar(plt)
                
         
-    return lbl, lblmax
+    return lbl.reshape([nlay,nrow,ncol]), lblmax
 
-def export_recharge(dis, rch):
+def export_zone_raster(lbl, dis, raster_step=40,
+                              nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0, 
+                              x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):
+    # Model geometry
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
+    
+    
+    
+    #write raste
+    _write_raster('zones',lbl,xc,yc, XYgrid,raster_step=raster_step, method='nearest', nodata_value=1, number_format='{0:.0f}')
+    
+def export_recharge_raster(dis, rch, bas,
+                           raster_step=80, interpolation_method='nearest',
+                           nodata_value=-99999,
+                           nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0,
+                           x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):
     '''
     This creates a recharge file for every stress period. The file consists of a list of recharge flux values for every node, one entry per line.:
         q(N(i))
@@ -491,56 +366,86 @@ def export_recharge(dis, rch):
     # Model Information
     #-----------   
     #model geometry size
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
 
     # model properties    
     rc=[]
     for i in range(0, len(rch.rech.array)):
         rc.append(rch.rech.array[i]) # recharge per stress period per cell
     
+    # Get ibound array
+    ibound=_get_ibound_array(dis,bas)  
+    
     #flip
     for i in range(0, len(rc)):
         rc[i]=np.flipud(rc[i])
-    
-    #ravel 
-    rcr=[]
-    for i in range(0, len(rc)):
-        rcr.append(rc[i].ravel(i))
-    
+    return rc
     # calcuate absolute time of each step
     t=[]
     perlen=dis.perlen.array
     for i in range(0,len(perlen)):
         t.append(np.sum(perlen[0:i]))
 
+    # Average RECHAGRE
+    a=[]
+    for i in range(len(rc)):
+        a.append(np.mean(rc[i][0][np.where((ibound[0]+ibound[1]+ibound[2])==1)]))
+    rch_avg=np.mean(a)
    
+    # Get rid of layers within stress perios
+    rcc=[]
+    for i in range(len(rc)):
+        rcc.append(rc[i][0])
+        
+    # Create stationary recharge variable
+    rcc_stat=np.sum(rcc, 0)/np.shape(rcc)[0]/10
+    #_write_raster('rch/recharge_steady',rcc_stat,xc,yc, XYgrid,raster_step=40)
+
     # Write Model Information to files
-    _dir_check()
+    [x_step, y_step, 
+     x_range, y_range, 
+    x_nsteps, y_nsteps, 
+    XLLCORNER, YLLCORNER, 
+    XYRgrid] = _calculate_raster_parameter(raster_step, xc, yc)
+    ##interpolate    
+    rcc_i=_interpolate(rcc, XYgrid, XYRgrid, method=interpolation_method, nodata_value=nodata_value)
+    rcc_stat_i=_interpolate(rcc_stat, XYgrid, XYRgrid, method=interpolation_method, nodata_value=nodata_value)
+    ##write raster
+    _write_raster('rch/recharge_stationary',rcc_stat_i,x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, raster_step=raster_step, nodata_value=nodata_value, number_format='{0:.8f}')
+    _write_raster('rch/recharge_t',rcc_i,x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, raster_step=raster_step, nodata_value=nodata_value, number_format='{0:.8f}')
     
-    file=open('hgs_files/recharge.in', 'w')
+    
+    file=open('hgs_files/recharge_raster.in', 'w')
     for i in range(0,len(t)):
-        file.write(str(t[i])+' '+'hgs_files/rch/recharge_t'+str(i+1)+'.in \n')
+        file.write(str(t[i])+' '+'hgs_files/rch/recharge_t'+str(i+1)+'.asc \n')
     file.close
-    
-    for i in range(0,len(t)):
-        file=open('hgs_files/rch/recharge_t'+str(i+1)+'.in', 'w')
-        file.write(str(len(rcr[i]))+'\n')
-        for q in range(0,len(rcr[i])):
-            file.write(str(rcr[i][q])+'\n')
-        file.close
-    
 
     # print result   
     print('-----------------')
     print('Sucessfully exported recharge files!\n')
+    print('Average Rcharge: '+'{0:.2e}'.format(rch_avg))
     
     
-def export_well(dis, wel):
+def export_well(dis, wel, 
+                nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0, 
+                x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):
     #-----------
     # Model Information
     #-----------   
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
-    
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
+
     #xy-coordinates (node-centered)
     x=flopy.utils.reference.SpatialReference.get_xedge_array(dis)
     y=np.sort(flopy.utils.reference.SpatialReference.get_yedge_array(dis))
@@ -567,7 +472,7 @@ def export_well(dis, wel):
     
     # WEL-file data
     well_data=wel.stress_period_data.get_dataframe()
-
+    
     # flip layer and rows
     well_data['k']=nlay-1-well_data['k']
     well_data['i']=nrow-well_data['i']-1
@@ -579,7 +484,10 @@ def export_well(dis, wel):
     for i in range(len(well_data['j'])):
         x_wel.append(x[well_data['j'][i]])
         y_wel.append(y[well_data['i'][i]])
-        z_wel.append(z[well_data['k'][i]][well_data['i'][i],well_data['j'][i]])
+        z_bot=z[well_data['k'][i]][well_data['i'][i],well_data['j'][i]]
+        z_top=z[well_data['k'][i]+1][well_data['i'][i],well_data['j'][i]]
+        z_well_bot=z_bot+((z_top-z_bot)/2)
+        z_wel.append(z_well_bot)
     well_data['x']=x_wel
     well_data['y']=y_wel
     well_data['z']=z_wel
@@ -587,8 +495,10 @@ def export_well(dis, wel):
     
     #Write Model Information to files
     _dir_check()
-    file=open('hgs_files/well_bc.in', 'w')        
-    for i in range(len(well_data)):    
+    
+   
+    for i in range(len(well_data)):  
+        file=open('./hgs_files/well_db/well_'+str(i)+'.in', 'w')              
         file.write('!---- well ' + str(i+1)+'\n')
         file.write('clear chosen nodes \n') 
         file.write('choose node \n')
@@ -604,8 +514,12 @@ def export_well(dis, wel):
         file.write('  time value table \n')
         Q_temp=0
         q_now=0
+        q_tot=0
+        q_count=0
         for q in range(len(t)):
             if hasattr(well_data, str('flux'+str(q))):
+                q_tot+= well_data['flux'+str(q)][i]
+                q_count+=1
                 q_prev = q_now
                 q_now = well_data['flux'+str(q)][i]
                 if q_now != q_prev:
@@ -615,20 +529,65 @@ def export_well(dis, wel):
                     pass
             else:
                 pass
+        q_avg=q_tot/q_count
         file.write('  end \n')
+        file.write('  \n')
+        file.write('  tecplot output\n\n')
         file.write('end \n\n')
-    file.close 
+        file.close()
+ 
+
+        # Steady-State Extraction     
+        file=open('./hgs_files/well_db/well_stat_'+str(i)+'.in', 'w')              
+        file.write('!---- well ' + str(i+1)+'\n')
+        file.write('clear chosen nodes \n') 
+        file.write('choose node \n')
+        file.write('  '+str(well_data['x'][i]))
+        file.write('  '+str(well_data['y'][i]))
+        file.write('  '+str(well_data['z'][i])+'\n\n')
+        file.write('create node set \n')
+        file.write('  well'+str(i+1)+'\n \n')
+        file.write('boundary condition \n')
+        file.write('  type\n')
+        file.write('  flux nodal\n\n')
+        file.write('  node set \n'+'  well'+str(i+1)+'\n\n')
+        file.write('  time value table \n')
+        file.write('   0 '+str(q_avg)+'\n')  
+        file.write('  end \n')
+        file.write('  \n')
+        file.write('  tecplot output\n\n')
+        file.write('end \n\n')
+        file.close
+    
+    file=open('./hgs_files/well_bc.in', 'w') 
+    for i in range(len(well_data)):
+        file.write('include '+'./well_db/well_'+str(i)+'.in \n')
+    file.close
+    
+    file=open('./hgs_files/well_bc_stat.in', 'w') 
+    for i in range(len(well_data)):
+        file.write('include '+'./well_db/well_stat_'+str(i)+'.in \n')
+    file.close
     
     # print result   
     print('-----------------')
     print('Sucessfully exported well data file!\n')
     print('Total Wells: '+str(np.shape(well_data)[0])+'\n')
+    
+    return well_data
+ 
 
-def export_drain(dis, drn):      
-    #-----------
+def export_drain(dis, drn,
+                 nrow=0,  ncol=0, nrowc=0, ncolc=0, nlay=0, 
+                 x=0, y=0, XYgrid=0, xc=0, yc=0, XYCgrid=0):      
     # Model Information
-    #-----------   
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
+    if (nrow    == 0  or  ncol   == 0  or 
+        nrowc   == 0  or  ncolc  == 0  or 
+        nlay    == 0  or  x      == 0  or
+        y       == 0  or  XYgrid == 0  or 
+        xc      == 0  or  yc     == 0  or
+        XYCgrid == 0):
+        [nrow,  ncol, nrowc, ncolc, nlay,x, y, XYgrid, xc, yc, XYCgrid]=model_dimensions(dis)
 
     #xy-coordinates (node-centered)
     x=flopy.utils.reference.SpatialReference.get_xedge_array(dis)
@@ -658,10 +617,14 @@ def export_drain(dis, drn):
     x_drn=[]
     y_drn=[]
     z_drn=[]
+    
     for i in range(len(drain_data['j'])):
         x_drn.append(x[drain_data['j'][i]])
         y_drn.append(y[drain_data['i'][i]])
-        z_drn.append(z[drain_data['k'][i]][drain_data['i'][i],drain_data['j'][i]])
+        z_bot=z[drain_data['k'][i]][drain_data['i'][i],drain_data['j'][i]]
+        z_top=z[drain_data['k'][i]+1][drain_data['i'][i],drain_data['j'][i]]
+        z_drain_bot=z_bot+((z_top-z_bot)/2)
+        z_drn.append(z_drain_bot)
     drain_data['x']=x_drn
     drain_data['y']=y_drn
     drain_data['z']=z_drn
@@ -700,12 +663,13 @@ def export_drain(dis, drn):
         file.write('end \n\n')
     file.close  
     
- 
-    # print result   
+        # print result   
     print('-----------------')
     print('Sucessfully exported drain data file!\n')
     print('Total Drains: '+str(np.shape(drain_data)[0])+'\n')
 
+    return drain_data
+ 
 def export_timestep(dis):
     #Time data
     t=[] # time
@@ -722,36 +686,201 @@ def export_timestep(dis):
         file.write('  '+str(t[i])+'\n')
     file.write('end ! output times \n')
     file.close
+
+def _polish_grid(z, ibound, nrow, ncol, nlay):
+    '''
+    Input:
+        z - Array of heights in the following shape (nlay, nrow, ncol)
+        ibound - Array of inactive/active elements (0 = inactive, 1 = active)
+        nrow - number of rows
+        ncol - number of columns
+        nlay -  number of layers
+        
+    Output:
+        z_polished - polished array of z
     
-def export_all(modelprefix, nsublayer=0):
+    This function imnproves grid quality for HGS by removing height information
+    of the inactive cells and by reducing the height in cases of layers exceeding
+    the higher layer
+    '''
+    
+    # get ibound array and add safety margin 
+#    if len(np.shape(ibound))==3:
+#        ibound_sum=np.sum(ibound, axis=0)
+#        ibound_joined=np.squeeze(np.array([ibound_sum>0], dtype=int))
+#    else:
+#        ibound_joined=ibound
+    
+    pos_ones=np.where(ibound_joined==1)
+    for i in [0,1,-1,]:
+        for q in [0,1,-1]:
+            ibound_joined[pos_ones[0]+i,pos_ones[1]+q]=1
+    
+    #Filter out height information outside of model domain
+#    for i in range(nlay+1):
+#        z[i]=z[i]*ibound_joined
+    
+    # increase height
+#    for i in range(nlay):
+#        cond2=abs(z[i]-z[i+1])<10
+#        cond3=ibound[i]!=0
+#        print(np.shape(np.where(cond2))[1])
+    for i in range(nlay):
+        cond2=abs(z[i]-z[i+1])<10
+        cond1=abs(z[i]-z[i+1])==0
+        print(np.shape(np.where(cond1&cond2))[1])
+        pos=np.where(cond1&cond2)
+        for q in range(np.shape(pos)[1]):
+            z[i][pos[0][q],pos[1][q]]=z[i+1][pos[0][q],pos[1][q]]
+
+    # Filter out unusua al high or low botm layers
+    for q in range(4):
+        for i in range(0,len(z)-1):
+            z[i][np.where(z[i]>z[i+1])]=z[i+1][np.where(z[i]>z[i+1])]
+
+
+    return z
+
+# Internal functions    
+def _dir_check(): 
+    '''
+    Check for export folder "hgs_files"
+    '''
+
+    if os.path.isdir('./hgs_files')==1:
+        pass
+    elif os.path.isdir('./hgs_files')==0:
+        os.mkdir('./hgs_files')
+    if os.path.isdir('./hgs_files/rch')==1:
+        pass
+    elif os.path.isdir('./hgs_files/rch')==0:
+        os.mkdir('./hgs_files/rch')
+    if os.path.isdir('./hgs_files/well_db')==1:
+        pass
+    elif os.path.isdir('./hgs_files/well_db')==0:
+        os.mkdir('./hgs_files/well_db')
+        
+        
+def _labelPix(pix,n_val):
+    '''
+    Pix: Input Array of Mprops
+    n_val: Number of Mprops per cell
+    
+    Returns unique Zone numbers for cells of same material properties
+    '''
+    height, width, _ = pix.shape
+    pixRows = np.reshape(pix, (height * width, n_val))
+    unique, count = np.unique(pixRows, return_counts = True, axis = 0)
+    
+    lbl = np.zeros((height, width), dtype = int)
+    
+    index=1
+    for zoneArray in unique:
+        pos=np.where((pix[:,:,0]==zoneArray[0])&(pix[:,:,1]==zoneArray[1])&(pix[:,:,2]==zoneArray[2]) & (pix[:,:,3]==zoneArray[3]))
+        lbl[pos]=index
+        index+=1
+    
+    lblmax=index-1
+
+    return lbl,lblmax, unique
+        
+def _interpolate(array, XYgrid, XYgrid_interpolated, method='cubic', nodata_value=-99999):
+    array_interpolated=[]
+    shape=[len(np.unique(XYgrid_interpolated[:,1])),
+           len(np.unique(XYgrid_interpolated[:,0]))]
+    
+    if len(np.shape(array))==3:    
+        for i in range(0,len(array)):
+            array_interpolated.append(griddata(XYgrid,array[i].ravel(),XYgrid_interpolated, method=method,fill_value=nodata_value).reshape(shape)) # calculated via cubic interpolation
+    elif len(np.shape(array))==2:
+        array_interpolated.append(griddata(XYgrid,array.ravel(),XYgrid_interpolated, method=method,fill_value=nodata_value).reshape(shape))
+    else:
+        raise IndexError
+        
+    return array_interpolated
+
+def _write_raster(file_name, array, x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, raster_step=40, nodata_value=-99999, number_format='{0:.2f}'):
       
-    #load modflow
-    [ml, dis, bas, lpf, rch, wel, drn]=load_modflowmodel(modelprefix)
-    [nrow, ncol, nrowc, ncolc, nlay]=model_dimensions(dis)
-    if nsublayer==0:
-        nsublayer=np.ones([1,nlay])
+    # Export to raster
+    if len(np.shape(array))==3:
+        iterations=len(array)
+    elif len(np.shape(array))==2:
+        iterations=1  
+  
+    for i in range(iterations):
+        file=open('hgs_files/'+file_name+str(i+1)+'.asc','w')
+        file.write('NCOLS '+str(x_nsteps)+'\n')
+        file.write('NROWS '+str(y_nsteps)+'\n')
+        file.write('XLLCORNER '+'{0:.2f}'.format(XLLCORNER)+'\n')
+        file.write('YLLCORNER '+'{0:.2f}'.format(YLLCORNER)+'\n')
+        file.write('CELLSIZE '+'{0:.2f}'.format(raster_step)+'\n')
+        file.write('NODATA_VALUE '+number_format.format(nodata_value)+'\n')
+        for q in reversed(range(y_nsteps)):
+            for element in array[i][q,:]:
+                file.write(number_format.format(element).replace('e','d')+' ')
+            file.write('\n')
+        file.close
+        
+def _change_order_to_hydrogeosphere(array):
+    # change layer numbering
+    array=np.flipud(array)
     
-    #export all
-    XYgrid,XYCgrid=export_grid(dis)
-    ibound=export_ibound(dis,bas, nsublayer)
-    lbl, lblmax=export_mprops(dis,lpf,ibound, nsublayer)
-    export_well(dis, wel)
-    export_drain(dis, drn)
-    export_recharge(dis, rch)
+    # flip along x-achis
+    if len(np.shape(array))==2:
+        pass
+    else:
+        iterations=np.shape(array)[0]
+        for i in range(iterations):
+            array[i]=np.flipud(array[i])
     
+    return array
 
-'''
-# unfinished projects
+def _create_ibound_joined(ibound):
+    if len(np.shape(ibound))==3:
+        ibound_sum=np.sum(ibound, axis=0)
+        ibound_joined=np.squeeze(np.array([ibound_sum>0], dtype=int))
+    else:
+        ibound_joined=ibound
+        
+    return ibound_joined
 
-def export_evapotranspiration_segments(modelprefix):
-    ml=flopy.modflow.Modflow()
-    flopy.modflow.ModflowDis.load(modelprefix+'.dis', ml)
-    bcf=flopy.modflow.ModflowBcf.load(modelprefix+'.bcf',ml)
-#   ....   
+def _get_ibound_array(dis, bas):
+    ibound=_change_order_to_hydrogeosphere(bas.ibound.array)    
+    ibound=_get_rid_zero_cells_ibound(dis, ibound) # get rid of zero volume cells
+    return ibound
 
-def export_stress(modelprefix):
-#   ....
+def _get_rid_zero_cells_ibound(dis, ibound):
+    #get cell volume
+    cell_volume=dis.get_cell_volumes()
+    
+    #change layer numbering
+    cell_volume=np.flipud(cell_volume)
+    
+    #flip along axis
+    for i in range(len(cell_volume)):
+        cell_volume[i]=np.flipud(cell_volume[i])
+        
+    # get rid of all cells with an zero volume
+    for i in range(len(ibound)):
+        ibound[i][np.where((cell_volume[i]==0)&(ibound[i]==1))]=0
+        
+    return ibound
 
-# drain obersavation (.drob file)    
-# head observation (.hob file)
-'''
+def _calculate_raster_parameter(raster_step, xc, yc):
+    # raster parameter
+    x_step=raster_step
+    y_step=raster_step
+    x_range=range(int(np.min(xc)-x_step*1), int(np.max(xc)+x_step*1), x_step)
+    y_range=range(int(np.min(yc)-y_step*1), int(np.max(yc)+y_step*1), y_step)
+    x_nsteps=len(x_range)
+    y_nsteps=len(y_range)
+    XLLCORNER=np.min(x_range)
+    YLLCORNER=np.min(y_range)
+    XYRgrid=np.array([np.meshgrid(x_range,y_range)[0].ravel(), np.meshgrid(x_range,y_range)[1].ravel()]).T 
+    
+    return x_step, y_step, x_range, y_range, x_nsteps, y_nsteps, XLLCORNER, YLLCORNER, XYRgrid
+ 
+def _repair_wrong_ibound_val(lbl):
+    pos=np.where((lbl[2]!=1) & (lbl[0]!=1) & (lbl[1]==1))
+    lbl[1][pos]=lbl[0][pos]
+    return lbl
